@@ -39,7 +39,7 @@ dataset:
   - const: botnet
     desc: Botnet data, that is, the containers of the botnet.
     value:
-      size: 2   # number of bots
+      size: 3   # number of bots
       broker:
         container: $(project)-redis
         image: redis:alpine
@@ -47,7 +47,7 @@ dataset:
         container: $(project)-carboni
         image: akromio/carboni:latest
       bot:
-        container: $(project)-cavanicava  
+        container: $(project)-cavani
         image: akromio/cavani:latest
         msg:
           count: 15000 # messages/bot to send
