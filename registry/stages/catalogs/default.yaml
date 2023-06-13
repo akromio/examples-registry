@@ -1,0 +1,50 @@
+spec: v1.0
+
+dataset:
+  - input: pauseDuration
+    desc: Pause stage duration.
+    defaultValue: 5s
+    
+  - input: warmupDuration
+    desc: Warm-up stage duration.
+    defaultValue: 30s
+  
+  - input: loadDuration
+    desc: Load stage duration.
+    defaultValue: 1m
+
+defaultStageName: load
+stages:
+  - sleep: pause
+    desc: A pause.
+    duration: $(pauseDuration)
+    
+  - const: warmup
+    desc: Warm-up stage for filling the cache.
+    duration: $(warmupDuration)
+    interval:
+      duration: 1s
+      requests: 5
+    jobs:
+      - job: web
+        weight: 100
+
+  - inc: load
+    desc: Constant load stage for performance analysis.
+    duration: $(loadDuration)
+    interval:
+      duration: 1s
+      requests: 200
+      inc: 2.5
+    jobs:
+      - job: web
+        weight: 50
+      
+      - job: android
+        weight: 30
+      
+      - job: ios
+        weight: 20
+  
+  - exit: exit
+    duration: 2s

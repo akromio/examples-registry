@@ -1,0 +1,217 @@
+spec: v1.0
+desc: Catalog with UDP flood attacks.
+
+dataset:
+  - input: project
+    desc: Project name
+    defaultValue: dos
+
+  - input: argsFile
+    desc: Path to the arguments file
+    defaultValue: args.yaml
+
+  - input: netDriver
+    desc: Network driver to use
+    defaultValue: bridge
+  
+  - input: stageCatalog
+    desc: Stage catalog to use
+    defaultValue: udp-flood
+
+  - const: net
+    desc: Data on the network to use.
+    value:
+      name: $(project)      # network name
+      driver: $(netDriver)  # network driver
+  
+  - const: network
+    desc: Network option to use in the 'docker run' command
+    value: --network=$(net.name)
+  
+  - const: victim
+    desc: Victim data, that is, the container to be attacked.
+    value:
+      container: $(project)-victim
+      image: httpd:alpine
+      memory: 6m
+      cores: 1
+  
+  - const: botnet
+    desc: Botnet data, that is, the containers of the botnet.
+    value:
+      size: 3   # number of bots
+      broker:
+        container: $(project)-redis
+        image: redis:alpine
+      mgr:
+        container: $(project)-carboni
+        image: akromio/carboni:latest
+      bot:
+        container: $(project)-cavani
+        image: akromio/cavani:latest
+        msg:
+          count: 15000 # messages/bot to send
+          size:
+            min: 29000
+            max: 30000
+  
+  - const: volume
+    desc: Volume option for docker run
+    value: -v $(workDir)/registry:/registry
+
+plugins:
+  - plugin: redis
+    ini:
+      host: localhost
+      port: 6379
+
+jobs:
+  - group: env
+    jobs:
+      - macro: create-env
+        title: Create the local environment w/ Docker
+        steps:
+          - create-net
+          - create-victim
+          - create-broker
+          - create-bots
+          - create-mgr
+
+      - macro: remove-env
+        title: Remove the local environment on Docker
+        steps:
+          - remove-victim
+          - remove-mgr
+          - remove-bots
+          - remove-broker
+          - remove-net
+  
+  - group: net
+    jobs:
+      - macro: create-net
+        title: Create the Docker network
+        steps:
+          - sudo: docker network create $(net.name) -d $(net.driver)
+
+      - macro: remove-net
+        title: Remove the Docker network
+        steps:
+          - sudo: docker network rm $(net.name)
+  
+  - group: victim
+    dataset:
+      - const: container
+        value: $(victim.container)
+    jobs:
+      - macro: create-victim
+        title: Create the victim container
+        # ini:
+        #   - sudo: docker pull $(victim.image)
+        dataset:
+          - const: image
+            value: $(victim.image)
+          - const: memory
+            value: --memory=$(victim.memory)
+          - const: cpus
+            value: --cpus=0.25 --cpuset-cpus=$(victim.cores)
+          - const: mount
+            value: -v /usr/share/doc/gdisk:/usr/local/apache2/htdocs/
+        steps:
+          - sudo: docker run --name $(container) $(cpus) $(memory) $(network) $(mount) -p 8080:80 -d $(image)
+          - show-victim-conf
+
+      - macro: show-victim-conf
+        title: Show the victim configuration
+        steps:
+          - log: exec sudo docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $(container)
+          - log: exec sudo docker exec -i $(container) sysctl net.core.somaxconn && cat /proc/meminfo | grep MemTotal
+
+      - macro: remove-victim
+        title: Remove the victim container
+        steps:
+          - sudo: docker rm -f $(container)
+
+  - group: broker
+    dataset:
+      - const: container
+        value: $(botnet.broker.container)
+    jobs:
+      - macro: create-broker
+        title: Create the broker container (Redis)
+        dataset:
+          - const: image
+            value: $(botnet.broker.image)
+        # ini:
+        #   - sudo: docker pull $(botnet.broker.image)
+        steps:
+          - sudo: docker run --name $(container) $(network) --rm -d -p 6379:6379 $(image)
+          - sleep 1s
+          - redis.ping
+      
+      - macro: remove-broker
+        title: Remove the broker container
+        steps:
+          - sudo: docker rm -f $(container)
+  
+  - group: mgr
+    dataset:
+      - const: container
+        value: $(botnet.mgr.container)
+    jobs:
+      - macro: create-mgr
+        title: Create the manager container (Carboni)
+        dataset:
+          - const: image
+            value: $(botnet.mgr.image)
+          - var: args
+        # ini:
+        #   - sudo: docker pull $(botnet.mgr.image)
+        steps:
+          - quiet: $args = file.read $(argsFile)
+          - quiet: $args = text $(args)
+          - quiet: $args = yaml.decode $(args)
+          - quiet: $args = set $(args) botnet.host $(botnet.broker.container)
+          - quiet: $args = json.encode $(args.botnet)
+          - log $(args)
+          - quiet: $args = base64.encode $(args)
+          - sudo: docker run --name $(container) $(network) $(volume) --rm -d -e KRM_ARG_botnet=json+base64://$(args) $(image) carboni r -l pause warmup load exit
+          - sudo: docker exec -i $(container) redis-cli -h $(botnet.broker.container) redis-cli PING
+      
+      - macro: remove-mgr
+        title: Remove the container manager
+        steps:
+          - sudo: docker rm -f $(container)
+
+  - group: bots
+    dataset:
+      - const: container
+        value: $(botnet.bot.container)
+    jobs:
+      - macro: create-bots
+        title: Create the bot containers (Cavani)
+        dataset:
+          - const: image
+            value: $(botnet.bot.image)
+          - const: broker
+            value: $(botnet.broker.container)
+          - const: victim
+            value: $(victim.container)
+          - var: name
+        # ini:
+        #   - sudo: docker pull $(botnet.bot.image)
+        forEach: $i = range 1 $(botnet.size)
+        steps:
+          - quiet: $name = text $(container)$(i)
+          - log: redis.xgroup.create $(name) $(name) $ MKSTREAM
+          - sudo: docker run --name $(name) $(network) $(volume) -d $(image) cavani r -c scenarios -a broker=$(broker) -a victim=$(victim) -a stream=$(name)
+          - sudo: docker exec -i $(name) redis-cli -h $(broker) PING
+
+      - macro: remove-bots
+        title: Remove the bot containers
+        dataset:
+          - var: name
+        forEach: $i = range 1 $(botnet.size)
+        steps:
+          - quiet: $name = text $(container)$(i)
+          - log: redis.xgroup.destroy $(name) $(name)
+          - sudo: docker rm -f $(name)

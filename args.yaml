@@ -1,0 +1,8 @@
+botnet:
+  impl: redisstreams
+  host: localhost
+  port: 6379
+  bots:
+    - bot: dos-cavani1
+    - bot: dos-cavani2
+    - bot: dos-cavani3

@@ -1,0 +1,37 @@
+spec: v1.0
+desc: Catalog with the load jobs.
+parallelism: 6
+
+dataset:
+  - input: broker
+    defaultValue: localhost
+  - input: victim
+    defaultValue: localhost
+  - input: stream
+
+defaultTriggerName: botnet
+on:
+  - trigger: botnet
+    impl: redisstreams
+    host: $(broker)
+    port: 6379
+    stream: $(stream)
+    group: $(stream)
+    consumer: dos-cavani1
+
+jobs:
+  - macro: web
+    title: Run a web scenario
+    steps:
+      - http.get http://$(victim)/?s=web1
+      - http.get http://$(victim)/?2=web2
+  
+  - macro: android
+    title: Run an Android scenario
+    steps:
+      - http.get http://$(victim)/?s=android
+  
+  - macro: ios
+    title: Run an iOS scenario
+    steps:
+      - http.get http://$(victim)/?s=ios
